@@ -1,0 +1,12 @@
+{'0': [4, 5, 7, 8], '1': [1, 2, 3, 4, 5, 6]}
+The class conditional accuracy for 0 is 0.9437229437229437
+The class conditional reserve rate for 0 is 0.0
+It comprises 0.6754385964912281 of the test set.
+The class conditional accuracy for 1 is 0.9819819819819819
+The class conditional reserve rate for 1 is 0.0
+It comprises 0.32456140350877194 of the test set.
+Accuracy is 0.956140350877193 with theta = 0.845, f = 0.5, and p0 = 0.51
+The reject rate is 0.0
+Confusion Matrix
+0 {'0': 0.6374269005847953, 'RESERVE': 0.0, '1': 0.038011695906432746}
+1 {'0': 0.005847953216374269, 'RESERVE': 0.0, '1': 0.31871345029239767}

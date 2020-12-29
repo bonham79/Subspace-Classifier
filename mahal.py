@@ -1,38 +1,88 @@
 """
-Functions for mahalanobis calculations.
+Functions for calculating Mahalanobis related functions.
+
+'eigenDecomp' produces the invcovariance matrix and eigenvectors
+necessary for projecting measurements to class subspaces and cacluating
+their distances from mean.
+
+'calcMahalDistance' returns the mahalanobis distance of a reduced measurement.
+
+'calcMahalProb' calculates the likelihood of chance occurence of a given measurement  # noqa: E501
+within a set of mahalanobis distances.
 """
+import bisect
 import numpy as np
-from typing import List, Tuple
+from typing import List, Tuple, Any
 
 
-def eigenDecomp(matrix, threshold):
-	# Takes a matrix and performs an
-	# eigenvalue decomposition to find minimum eigenvectors
-	# needed to exceed minimal percentage of eigenvalue proportion.
-	# Returns inverse covariance matrix with diagonals of eigenvalues and
-	# subset of eigenvectors as a projection array.
+def eigenDecomp(matrix: List[List[float]], threshold: float) -> List[Any]:
+	"""
+	Performs principal components analysis on matrix and returns
+	necessary vectors to project matrix while preserving threshold
+	value of variance. Also provides the inverse covariance matrix
+	of new projected values so as to calculate mahalanobis distance
+	for new measures.
 
-	# Calculates covariance matrix
-	covarMatrix = np.asmatrix(np.cov(matrix, rowvar=False, bias=False))
-	print(covarMatrix)
+	For cases where there is no variance (and thus all measures for
+	a class are the same), the function returns original measurements
+	as eigenvectors and a 0 matrix for invCovariance. This is used
+	for other functions to assume these measurements as distinguishing
+	features. (Note, an inverse covariance of 0 would only naturally
+	occur if there was infinite variance, which should not occur in
+	normal computations. Thus we avoid overlap.)
 
-	# Perform eigen decomposition
-	eigenValues, eigenVectors = np.linalg.eig(covarMatrix)
+	Inputs:
 
-	# Sorts values since numpy doesn't necessarily order.
-	eigenValuesSorted = np.flip(np.sort(eigenValues))
-	eigenVectorsSorted = eigenVectors[:, np.flip(eigenValues.argsort())]  # I hate numpy sorting...  # noqa: E501
+		matrix: Numpy matrix of measurement tuples. Each row is a measurement
+		each column is a variable. Assumes measurements have been processed
+		and centered around mean.
+
+		theshold: float specifying threshold of variance PCA must preserve.
+
+	Outpus:
+
+		invCovariance: inverse covariance matrix. Is 0 vector if there is
+		no variance in measurement set.
+
+		eigenVectors: eigenvectors that span subspace that accomodates theshold
+		percentage of variance in data. Used to project measurements to reduced
+		space.
+	"""
+
+	# Calculates covariance matrix. Numpy gets a bit funny with 1x1 cases so
+	# we're going to force matrix instead of array.
+	covarMatrix = np.asmatrix(np.cov(matrix, rowvar=False, bias=False))  # Bias is labeled for troubleshooting.  # noqa: E501
+
+	# If there's no variance, we assume this feature to explicitly categorize the
+	# space.
+	if np.all((covarMatrix == 0)):
+		# We'll return none and the matrix as an indicator that this needs
+		# to be processed differently.
+		return None, matrix
+
+	# Perform eigen decomposition. Covariance is postive singular.
+	eigenValues, eigenVectors = np.linalg.eigh(covarMatrix)
+
+	# Numpy orders ascending. So we need to flip them
+
+	# Find reversed index order.
+	reverse = np.flip(eigenValues.argsort())
+
+	# Apply to vectors and values.
+	eigenValuesSorted = eigenValues[reverse]
+	eigenVectorsSorted = eigenVectors[:, reverse]
+
 	# Identifies minimum span of eigenvectors by examining proportion of
-	# eigenvalue sums.
-	total = sum(eigenValuesSorted)
+	# eigenvalue sums. Stops when threshold is met (or all vectors used).
 	index = 1
+	total = sum(eigenValuesSorted)
 	currentSum = eigenValuesSorted[0]
-	while currentSum/total < threshold and index <= len(eigenValuesSorted):
+	while currentSum/total < threshold and index < len(eigenValuesSorted):
+		currentSum += eigenValuesSorted[index]
 		index += 1
-		currentSum = sum(eigenValuesSorted[:index])
-	
-	# Makes diagonal of eigenvalues (i.e. covariance matrix of new measure)
-	covar = np.asarray(np.diag(eigenValuesSorted[:index]))
+
+	# Makes diagonal of eigenvalues (i.e. covariance matrix of new measure).
+	covar = np.asmatrix(np.diag(eigenValuesSorted[:index]))
 
 	# and inverts
 	invCovar = np.linalg.inv(covar)
@@ -40,48 +90,74 @@ def eigenDecomp(matrix, threshold):
 	return invCovar, eigenVectorsSorted[:, :index]
 
 
-def calcMahalDistance(measure, invCovar, eigenVectors):
-	# Calculates the projected Mahalanobis distance for a single measure.
+def calcMahalDistance(measure: Tuple[float], invCovar: List[List[float]],
+	eigenVectors: List[List[float]]) -> float:
+	""" Calculates mahalanobis distance for measure after projection
+	into subspace defined by eigenVectors.
 
-	measure = np.asmatrix(measure)
-	invCovar = np.asmatrix(invCovar)
-	eigenVectors = np.asmatrix(eigenVectors)
-	y = np.transpose(eigenVectors) @ np.transpose(measure)  # measures are traditionally column vectors. we've been treating them as row vectors. Oops  # noqa: E501
+	Inputs:
+
+		measure: Tuple of floats representing a single measurement.
+
+		invCovar: matrix of the inverse-covariance of the target space.
+
+		eigenVectors: matrix of Principal Components used for projecting
+		to target space.
+
+	Outpus:
+
+		distance: float of the squared mahalanobis distance.
+	"""
+
+	# Checks of invCovariance is None (which means there was no variance in training)  # noqa: E501
+	if invCovar is None:
+		# Returns a None distance as placeholder. (This is only checked by the tagger, which is already dealing with this.)  # noqa: E501
+		return None
+
+	# Need to transpose measures (since notation has them as column vectors, 
+	# not row vectors as we do.) Project to space.
+	y = np.transpose(eigenVectors) @ np.transpose(measure)
+
+	# Calculate mahal distance.
 	yT = np.transpose(y)
 	dist = yT @ invCovar @ y
+
 	return dist
 
-def calcMahalProb(val, distances):
-	# Calculates probability of meas not being of class
-	# spanned by distances. assumes distances are sorted.
-	
-	
-	if val < distances[0]:  # All values are greater.
-		return 1/len(distances)
-	elif val > distances[-1]:  # There is no greater value..
+def calcMahalProb(val: float, distances: List[float]) -> float:
+	"""
+	Calculates probability that given value would occur by chance
+	in the space defined by distance distribution. Probabilities
+	are calculated by assuming each value of distance quantizes
+	a similar probability space, adjusted by .5 to avoid overlapping
+	distributions.
+
+	Inputs:
+
+		val: float value to be considered.
+
+		distances: ordered array of mahal distance distributions
+		for given space.
+
+	Outpus:
+
+		prob: float determining likilihood such value occurs by chance.
+	"""
+
+	# If larger than all distances.
+	if val > distances[-1]:
+		# 100% chance.
 		return 1
+
+	# If smaller than all other distances.
+	elif val < distances[0]:
+		# Falls into smallest quantization.
+		return 1 / len(distances)
+
 	else:
-		index = binCompare(distances, val) + 1 # Notes are for fortran indexing
-		return (index - .5)/len(distances)
-
-def binCompare(arr: Tuple[float], val: float)-> int:
-	# Binary search for comparing val x in array arr. Finds index of first value greater than x.  # noqa: E501
-	start = 0
-	end = len(arr) - 1
-	index = -1
-	while start <= end:
-		mid = (start + end) // 2
-
-# Move to right side if target is
-# greater.
-		if arr[mid] <= val:
-			start = mid + 1
-
-       # Move left side.
-		else:
-			index = mid
-			end = mid - 1
-	return index
+		# We locate the quantization that makes most sense.
+		index = bisect.bisect_right(distances, val)
+		return (index + .5) / len(distances)  # + 1 for indexing, -.5. See notes.
 
 def main():
 	# Test eigendecomp to make sure values and vectors are accurately computed taken from: https://towardsdatascience.com/the-mathematics-behind-principal-component-analysis-fff2d7f4b643  # noqa: E501
@@ -110,6 +186,6 @@ def main():
 
 	# Test calc mahal probability
 	distances = [1, 2, 3, 4, 5]
-	print(calcMahalProb(0, distances))  # Should be .3
+	print(calcMahalProb(.5, distances))  # Should be .1
 if __name__ == '__main__':
 	main()
